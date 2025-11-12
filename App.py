@@ -1,5 +1,5 @@
 import os
-from flask import Flask, render_template, request, redirect, url_for, send_from_directory, session, flash
+from flask import Flask, render_template, request, redirect, url_for, send_from_directory, session, flash, jsonify
 from werkzeug.utils import secure_filename
 from datetime import datetime, timedelta
 
@@ -27,7 +27,12 @@ MAX_ATTEMPTS = 10
 LOCKOUT_MINUTES = 30
 
 # 6. 全局变量，用于在内存中追踪当前分享的文件名列表
+#    注意: 在生产环境中，这可能不是最佳实践，因为Web服务器可能会有多个工作进程。
+#    但对于简单应用，这是可行的。
 CURRENT_FILENAMES = []
+# 程序启动时，可以从文件夹加载现有文件列表
+if os.path.exists(UPLOAD_FOLDER):
+    CURRENT_FILENAMES = os.listdir(UPLOAD_FOLDER)
 
 # --- 路由和视图函数 ---
 
@@ -36,6 +41,9 @@ CURRENT_FILENAMES = []
 def index():
     if not session.get('logged_in'):
         return redirect(url_for('login'))
+    # 每次访问主页时，都从文件系统同步一次文件列表
+    if os.path.exists(UPLOAD_FOLDER):
+        CURRENT_FILENAMES[:] = os.listdir(UPLOAD_FOLDER)
     return render_template('index.html', filenames=CURRENT_FILENAMES)
 
 # 文件上传路由 (受登录保护)
@@ -43,12 +51,13 @@ def index():
 def upload_files():
     global CURRENT_FILENAMES
     if not session.get('logged_in'):
-        return redirect(url_for('login'))
+        # 对于 AJAX 请求，返回一个错误状态码和 JSON 消息
+        return jsonify({'error': '用户未登录'}), 401
 
     uploaded_files = request.files.getlist('file')
     if not uploaded_files or uploaded_files[0].filename == '':
-        flash('未选择任何文件。', 'warning')
-        return redirect(url_for('index'))
+        # 返回 JSON 错误信息
+        return jsonify({'error': '未选择任何文件'}), 400
     
     # 先删除所有旧文件
     for filename in CURRENT_FILENAMES:
@@ -59,14 +68,19 @@ def upload_files():
     CURRENT_FILENAMES.clear()
 
     # 保存所有新文件
-    for file in uploaded_files:
-        if file:
-            filename = secure_filename(file.filename)
-            file.save(os.path.join(app.config['UPLOAD_FOLDER'], filename))
-            CURRENT_FILENAMES.append(filename)
-    
-    flash('文件已成功更新！', 'success')
-    return redirect(url_for('index'))
+    try:
+        for file in uploaded_files:
+            if file:
+                filename = secure_filename(file.filename)
+                file.save(os.path.join(app.config['UPLOAD_FOLDER'], filename))
+                CURRENT_FILENAMES.append(filename)
+        
+        # 返回成功的 JSON 响应
+        return jsonify({'success': '文件已成功更新！', 'filenames': CURRENT_FILENAMES}), 200
+    except Exception as e:
+        # 如果保存过程中出现错误
+        return jsonify({'error': f'文件上传失败: {str(e)}'}), 500
+
 
 # 登录路由 (带暴力破解防御)
 @app.route('/login', methods=['GET', 'POST'])
